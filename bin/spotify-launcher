@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+"""Launch Spotify with a version-specific notification image compatibility shim."""
+import hashlib
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+import tempfile
+
+SUPPORTED_SHA256 = 'a2009fc004c57f7037c88f5055996344146d1c63b9db3b99a38c2a12bd3d341d'
+STANDARD_LAUNCHER = '/usr/bin/spotify-launcher'
+
+
+def prepare_library(home):
+    source = Path(__file__).resolve().parents[1] / 'src/spotify-notification-fix.c'
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    cache = Path(os.environ.get('XDG_CACHE_HOME') or home / '.cache') / 'spotify-notification-fix'
+    cache.mkdir(parents=True, exist_ok=True)
+    library = cache / (digest + '.so')
+    if library.is_file():
+        return library
+    flags = shlex.split(subprocess.check_output(['pkg-config', '--cflags', 'gdk-pixbuf-2.0'], text=True))
+    with tempfile.NamedTemporaryFile(dir=cache, suffix='.so', delete=False) as temporary:
+        output = Path(temporary.name)
+    try:
+        subprocess.run(['cc', '-std=c11', '-O2', '-Wall', '-Wextra', '-Werror', '-fPIC',
+            '-fvisibility=hidden', '-shared', str(source), *flags, '-ldl', '-pthread',
+            '-Wl,-z,relro,-z,now', '-o', str(output)], check=True)
+        output.chmod(0o644)
+        output.replace(library)
+    finally:
+        output.unlink(missing_ok=True)
+    return library
+
+
+def main(arguments):
+    home = Path.home()
+    binary = home / '.local/share/spotify-launcher/install/usr/share/spotify/spotify'
+    prepare_only = arguments == ['--prepare-notification-fix']
+    try:
+        with binary.open('rb') as source:
+            supported = hashlib.file_digest(source, 'sha256').hexdigest() == SUPPORTED_SHA256
+    except OSError:
+        supported = False
+    environment = os.environ.copy()
+    if supported:
+        try:
+            library = prepare_library(home)
+        except (OSError, subprocess.CalledProcessError) as error:
+            print(f'Could not prepare the Spotify notification image shim: {error}', file=sys.stderr)
+            if prepare_only:
+                return 1
+        else:
+            if prepare_only:
+                print(f'Prepared the notification image shim: {library}')
+                return 0
+            previous = environment.get('LD_PRELOAD', '')
+            environment['LD_PRELOAD'] = str(library) + (':' + previous if previous else '')
+    else:
+        print('Skipping the notification image shim: Spotify is missing or this executable is unsupported.', file=sys.stderr)
+        if prepare_only:
+            return 1
+    # Standard launcher keeps handling updates, spotify-flags.conf and URI args.
+    # If it updates the client after the hash check, the .so also checks Build ID.
+    os.execve(STANDARD_LAUNCHER, ['spotify-launcher', *arguments], environment)
+
+
+if __name__ == '__main__':
+    sys.exit(main(sys.argv[1:]))
