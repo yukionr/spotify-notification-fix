@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Launch Spotify with a version-specific notification image compatibility shim."""
+"""Launch Spotify with a notification image compatibility shim."""
 import hashlib
 import os
 from pathlib import Path
@@ -8,7 +8,6 @@ import subprocess
 import sys
 import tempfile
 
-SUPPORTED_SHA256 = 'a2009fc004c57f7037c88f5055996344146d1c63b9db3b99a38c2a12bd3d341d'
 STANDARD_LAUNCHER = '/usr/bin/spotify-launcher'
 
 
@@ -38,13 +37,8 @@ def main(arguments):
     home = Path.home()
     binary = home / '.local/share/spotify-launcher/install/usr/share/spotify/spotify'
     prepare_only = arguments == ['--prepare-notification-fix']
-    try:
-        with binary.open('rb') as source:
-            supported = hashlib.file_digest(source, 'sha256').hexdigest() == SUPPORTED_SHA256
-    except OSError:
-        supported = False
     environment = os.environ.copy()
-    if supported:
+    if binary.is_file():
         try:
             library = prepare_library(home)
         except (OSError, subprocess.CalledProcessError) as error:
@@ -58,11 +52,11 @@ def main(arguments):
             previous = environment.get('LD_PRELOAD', '')
             environment['LD_PRELOAD'] = str(library) + (':' + previous if previous else '')
     else:
-        print('Skipping the notification image shim: Spotify is missing or this executable is unsupported.', file=sys.stderr)
+        print('Skipping the notification image shim: Spotify is not installed.', file=sys.stderr)
         if prepare_only:
             return 1
     # Standard launcher keeps handling updates, spotify-flags.conf and URI args.
-    # If it updates the client after the hash check, the .so also checks Build ID.
+    # Image decoding is limited by its notification instruction pattern at runtime.
     os.execve(STANDARD_LAUNCHER, ['spotify-launcher', *arguments], environment)
 
 

@@ -1,5 +1,4 @@
 import contextlib
-import hashlib
 import importlib.machinery
 import importlib.util
 import io
@@ -27,10 +26,9 @@ class LauncherTest(unittest.TestCase):
         self.binary = self.home / '.local/share/spotify-launcher/install/usr/share/spotify/spotify'
         self.binary.parent.mkdir(parents=True)
         self.binary.write_bytes(b'test executable')
-        self.module.SUPPORTED_SHA256 = hashlib.sha256(b'test executable').hexdigest()
 
-    def run_main(self, args, preload=''):
-        with patch.object(self.module.Path, 'home', return_value=self.home), patch.object(self.module.os, 'execve') as execute, patch.object(self.module, 'prepare_library', return_value=self.home / 'fix.so') as prepare, patch.dict(os.environ, {'LD_PRELOAD': preload}, clear=False), contextlib.redirect_stderr(io.StringIO()):
+    def run_main(self, args, preload='', prepare_error=None):
+        with patch.object(self.module.Path, 'home', return_value=self.home), patch.object(self.module.os, 'execve') as execute, patch.object(self.module, 'prepare_library', return_value=self.home / 'fix.so', side_effect=prepare_error) as prepare, patch.dict(os.environ, {'LD_PRELOAD': preload}, clear=False), contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
             result = self.module.main(args)
         return result, execute, prepare
 
@@ -42,11 +40,11 @@ class LauncherTest(unittest.TestCase):
         self.assertEqual(args[1], ['spotify-launcher', '--', 'spotify:track:fixture'])
         self.assertEqual(args[2]['LD_PRELOAD'], str(self.home / 'fix.so') + ':/existing.so')
 
-    def test_other_version_launches_without_adding_patch(self):
+    def test_updated_executable_still_loads_patch(self):
         self.binary.write_bytes(b'updated executable')
         result, execute, prepare = self.run_main(['--version'], '/existing.so')
-        prepare.assert_not_called()
-        self.assertEqual(execute.call_args.args[2]['LD_PRELOAD'], '/existing.so')
+        prepare.assert_called_once()
+        self.assertEqual(execute.call_args.args[2]['LD_PRELOAD'], str(self.home / 'fix.so') + ':/existing.so')
 
     def test_prepare_does_not_launch(self):
         with contextlib.redirect_stdout(io.StringIO()):
@@ -61,12 +59,21 @@ class LauncherTest(unittest.TestCase):
         prepare.assert_not_called()
         execute.assert_called_once()
 
-    def test_prepare_rejects_unsupported_version(self):
+    def test_prepare_accepts_updated_executable(self):
         self.binary.write_bytes(b'updated executable')
         result, execute, prepare = self.run_main(['--prepare-notification-fix'])
+        self.assertEqual(result, 0)
+        execute.assert_not_called()
+        prepare.assert_called_once()
+
+    def test_compilation_failure_preserves_normal_startup(self):
+        result, execute, prepare = self.run_main([], '/existing.so', OSError('compiler unavailable'))
+        self.assertEqual(execute.call_args.args[2]['LD_PRELOAD'], '/existing.so')
+
+    def test_prepare_reports_compilation_failure_without_launching(self):
+        result, execute, prepare = self.run_main(['--prepare-notification-fix'], prepare_error=OSError('compiler unavailable'))
         self.assertEqual(result, 1)
         execute.assert_not_called()
-        prepare.assert_not_called()
 
 if __name__ == '__main__':
     subprocess.run(['python3', str(ROOT / 'tests/run_native.py')], check=True)
